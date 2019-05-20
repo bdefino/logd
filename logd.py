@@ -1,183 +1,99 @@
-# Copyright 2018 Bailey Defino
-# <https://bdefino.github.io>
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-__package__ = __name__
-
+#!/bin/python
 import os
 import socket
 import sys
 import time
+import traceback
 
-from lib import baseserver, conf
+__doc__ = """logd - UDP log daemon
+Usage: ./logd.py [-d DIR] [IFACE[:PORT]]
+DIR
+	output directory
+IFACE
+	listening interface (defaults to "" wildcard)
+PORT
+	listening port (defaults to 55555)"""
 
-__doc__ = """log incoming data via TCP
-Usage: python logd.py [OPTIONS]
-OPTIONS
-\t-a, --address=ADDRESS\taddress
-\t\tdefaults to the highest IP version possible, on an OS-provided port
-\t\tIPv4 example: "127.0.0.1:8888"
-\t\tIPv6 example: "[::1]:8888"
-\t-c, --config=PATH\tconfiguration file
-\t\te.g.
-\t\t\t[server] # the default IPv6 server
-\t\t\taddress: [::1]:8888
-\t\t\troot: .
-\t-h, --help\tdisplay this text and exit
-\t-r, --root=PATH\troot directory"""
+UDP_CAPACITY = 65536
+UDP_DATA_CAPACITY = UDP_CAPACITY - 8 # remove header length
 
-class Logd(baseserver.BaseServer):
-    def __init__(self, root = os.getcwd(), *args, **kwargs):
-        baseserver.BaseServer.__init__(self, baseserver.event.ConnectionEvent,
-            LogdHandler, *args, **kwargs)
-        self.root = root
+class LogD:
+    def __init__(self, addr, _dir = os.getcwd()):
+        self.addr = addr
+        self.dir = _dir
 
-        if not os.path.exists(self.root):
-            os.makedirs(self.root)
-        elif not os.path.isdir(self.root):
-            raise OSError("root (\"%s\") exists, and isn't a directory"
-                % self.root)
+    def __call__(self):
+        _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        _sock.settimeout(0.1)
+        _sock.bind(self.addr)
 
-class LogdHandler(baseserver.event.Handler):
-    def __init__(self, *args, **kwargs):
-        baseserver.event.Handler.__init__(self, *args, **kwargs)
-        self.event.conn.settimeout(self.event.server.sock_config.TIMEOUT)
-        self.path = os.path.join(self.event.server.root,
-            baseserver.atos(self.event.remote), str(round(time.time(), 10))) \
-            + ".dat"
-        dir = os.path.dirname(self.path)
-        
-        if not os.path.exists(dir):
-            os.makedirs(dir)
-        elif not os.path.isdir(dir):
-            raise OSError("\"%s\" exists, and isn't a directory" % dir)
-        self.fp = open(self.path, "wb")
-    
-    def next(self):
+        if not os.path.exists(self.dir):
+            os.makedirs(self.dir)
+        elif not os.path.isdir(self.dir):
+            _sock.close()
+            raise OSError("\"%s\" exists and isn't a directory" % self.dir)
+        print "[*] Running LogD on %s:%u in \"%s\"" % (self.addr[0], self.addr[1], self.dir)
+
         try:
-            self.fp.write(self.event.conn.recv(
-                self.event.server.sock_config.BUFLEN))
-            self.fp.flush()
-            os.fdatasync(self.fp.fileno())
-        except socket.timeout:
+            while 1:
+                time.sleep(0.1) # not REALLY necessary, but we don't want to overuse the CPU
+
+                try:
+                    data, remote = _sock.recvfrom(UDP_DATA_CAPACITY)
+                except socket.timeout:
+                    continue
+                path = os.path.realpath(os.path.join(self.dir, remote[0], str(remote[1]), "%f" % time.time()))
+                _dir = os.path.dirname(path)
+                print "[+] Received %u octets from %s:%u into \"%s\"" % (len(data), remote[0], remote[1], path)
+
+                if not os.path.exists(_dir):
+                    os.makedirs(_dir)
+                elif not os.path.isdir(_dir):
+                    raise OSError("\"%s\" exists, and isn't a directory" % _dir)
+
+                with open(path, "wb") as fp:
+                    fp.write(data)
+                    os.fdatasync(fp.fileno())
+                del data, remote
+        except KeyboardInterrupt:
             pass
-        except (IOError, OSError): # also covers socket.error
-            self.event.conn.close()
-            raise StopIteration
+        except Exception as e:
+            print >> sys.stderr, "[!] LogD encountered fatal error:"
+            print >> sys.stderr, traceback.format_exc(e)
+        finally:
+            print "[*] Closing LogD on %s:%u..." % self.addr
+            _sock.close()
+            print "[*] Closed LogD."
 
 if __name__ == "__main__":
-    class AddressConfig(baseserver.TCPConfig):
-        pass
-    
-    i = 1
-    root = os.getcwd()
+    addr = ['', 55555]
+    argv = sys.argv[1:]
+    _dir = os.getcwd()
+    i = 0
 
-    while i < len(sys.argv):
-        arg = sys.argv[i]
+    while i < len(argv):
+        arg = argv[i]
 
-        if arg.startswith("--"):
-            arg = arg[2:]
-
-            if arg == "address":
-                if i == len(sys.argv) - 1:
-                    print "Argument required."
-                    sys.exit()
-
-                try:
-                    AddressConfig.ADDRESS = baseserver.stoa(sys.argv[i + 1])
-                except:
-                    print "Invalid address."
-                    sys.exit()
-                i += 1
-            elif arg == "config":
-                if i == len(sys.argv) - 1:
-                    print "Argument required."
-                    sys.exit()
-
-                try:
-                    config = conf.Conf(open(sys.argv[i + 1]))
-                    
-                    if config:
-                        if "address" in config[0]:
-                            AddressConfig.ADDRESS = baseserver.stoa(
-                                config[0]["address"])
-                        root = config[0].get("root", root)
-                except:
-                    print "Invalid configuration file."
-                    sys.exit()
-                i += 1
-            elif arg == "help":
+        if arg == "-d":
+            if i + 1 >= len(argv):
+                print "Argument required."
                 print __doc__
-                sys.exit()
-            elif arg == "root":
-                if i == len(sys.argv) - 1:
-                    print "Argument required."
-                    sys.exit()
-                i += 1
-                root = sys.argv[i]
-            else:
-                "Invalid option."
-                sys.exit()
-        elif arg.startswith("-"):
-            for c in arg[1:]:
-                if c == 'a':
-                    if i == len(sys.argv) - 1:
-                        print "Argument required."
-                        sys.exit()
+                sys.exit(1)
+            _dir = argv[i + 1]
+            i += 1
+        else:
+            if ':' in arg:
+                addr =  arg.rsplit(':', 1)
 
-                    try:
-                        AddressConfig.ADDRESS = baseserver.stoa(
-                            sys.argv[i + 1])
-                    except:
-                        print "Invalid address."
-                        sys.exit()
-                    i += 1
-                elif c == 'c':
-                    if i == len(sys.argv) - 1:
-                        print "Argument required."
-                        sys.exit()
-
-                    try:
-                        config = conf.Conf(open(sys.argv[i + 1]))
-                        
-                        if config:
-                            if "address" in config[0]:
-                                AddressConfig.ADDRESS = baseserver.stoa(
-                                    config[0]["address"])
-                            root = os.path.realpath(os.path.join(
-                                    os.path.dirname(sys.argv[i + 1]),
-                                    config[0].get("root", root)))
-                    except:
-                        print "Invalid configuration file."
-                        sys.exit()
-                    i += 1
-                elif c == 'h':
+                try:
+                    port = int(port)
+                except:
+                    print "Expected integer."
                     print __doc__
-                    sys.exit()
-                elif c == 'r':
-                    if i == len(sys.argv) - 1:
-                        print "Argument required."
-                        sys.exit()
-                    i += 1
-                    root = sys.argv[i]
-                else:
-                    print "Invalid option."
-                    sys.exit()
+                    sys.exit(1)
+            else:
+                addr[0] = arg
         i += 1
-    
-    #mkconfig
-    
-    server = Logd(root, AddressConfig)
-    server.thread(baseserver.threaded.Pipelining(nthreads = 4))
-    server()
+    LogD(tuple(addr), _dir)()
