@@ -6,7 +6,7 @@ import time
 import traceback
 
 __doc__ = """logd - UDP log daemon
-Usage: ./logd.py [-d DIR] [IFACE[:PORT]]
+Usage: ./logd.py [-d DIR] [-h | --help] [IFACE[:PORT]]
 DIR
 	output directory
 IFACE
@@ -83,6 +83,9 @@ if __name__ == "__main__":
                 sys.exit(1)
             _dir = argv[i + 1]
             i += 1
+        elif arg in ("-h", "--help"):
+            print __doc__
+            sys.exit(1)
         else:
             if ':' in arg:
                 addr =  arg.rsplit(':', 1)
